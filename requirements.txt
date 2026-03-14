@@ -7,3 +7,4 @@ django-cors-headers==4.9.0
 pdfminer.six==20260107
 pycparser==3.0
 sqlparse==0.5.5
+gunicorn
