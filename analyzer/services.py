@@ -204,20 +204,29 @@ def extract_unique_skills(text):
 
     # normalize punctuation before scanning
     text = text.lower()
-    text = re.sub(r'[\/\-]', ' ', text)   # Python/Django → Python Django
-    text = re.sub(r'\s+', ' ', text)      # collapse extra spaces
-    
+    text = re.sub(r'[\/\-\.,&]', ' ', text)
+    text = text.replace(" or ", " ")
+    text = text.replace(" and ", " ")
+    text = re.sub(r'\s+', ' ', text)
+
+    # ---- ADD THIS BLOCK HERE ----
+    text = re.sub(r'\bapis\b', 'api', text)
+    text = re.sub(r'\blambdas\b', 'lambda', text)
+    text = re.sub(r'\bqueues\b', 'queue', text)
+    text = re.sub(r'\bdatabases\b', 'database', text)
+    text = re.sub(r'\bservices\b', 'service', text)
+    # -----------------------------
+
     for variant, canonical in CANONICAL_MAP.items():
-        text = text.replace(variant, canonical)
+        pattern = r'\b' + re.escape(variant) + r'\b'
+        text = re.sub(pattern, canonical, text)
 
     text = replace_phrase_skills(text)
 
     found_skills = set()
 
     for skill in TECH_SKILLS:
-
         pattern = r'\b' + re.escape(skill) + r'\b'
-
         if re.search(pattern, text):
             found_skills.add(normalize_skill(skill))
 
@@ -239,7 +248,13 @@ def extract_jd_sections(job_description):
             "required","requirements",
             "must have","minimum qualifications",
             "qualifications","technical skills",
-            "skills required","key skills"
+            "skills required","key skills",
+            "skills and experience",
+            "your skills","experience",
+            "tech stack",
+            "technology stack",
+            "your skills include",
+            "skills include"
         ]):
             current_section = "required"
             continue
@@ -268,24 +283,28 @@ def extract_jd_sections(job_description):
 
 def extract_required_experience(text):
 
-    patterns = [
-    r'(\d+)\+?\s*(?:years?|yrs?)',
-    r'(\d+)\s*-\s*(\d+)\s*(?:years?|yrs?)',
-    r'(\d+)\+?\s*(?:years?|yrs?)\s*(?:experience|exp)'
-]
-
     text = text.lower()
 
+    patterns = [
+
+    # experience before numbers
+    r'(?:experience|exp).{0,20}(\d+)\s*-\s*(\d+)\s*(?:years?|yrs?)',
+
+    # number range
+    r'(\d+)\s*-\s*(\d+)\s*(?:years?|yrs?)',
+
+    # 5+ years
+    r'(\d+)\+?\s*(?:years?|yrs?).{0,20}(?:experience|exp)',
+
+    # experience ... 5 years
+    r'(?:experience|exp).{0,20}(\d+)\+?\s*(?:years?|yrs?)'
+]
+
     for pattern in patterns:
-
         match = re.search(pattern, text)
-
         if match:
-
-            if len(match.groups()) == 2:
-                return int(match.group(2))
-
-            return int(match.group(1))
+            nums = [int(n) for n in match.groups() if n]
+            return min(nums)
 
     return None
 
