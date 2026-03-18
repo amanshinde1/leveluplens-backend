@@ -66,7 +66,6 @@ CANONICAL_MAP = {
     "aws cloud":"aws",
     "amazon web services":"aws",
     "google cloud":"gcp",
-    "restful":"rest",
     "python3": "python",
     "py3": "python",
     "react.js": "react",
@@ -171,6 +170,31 @@ PHRASE_SKILLS = {
     "container orchestration":"kubernetes"
 }
 
+SEMANTIC_PATTERNS = {
+    "api": [
+        "backend service",
+        "backend services",
+        "rest endpoint",
+        "web service",
+        "web services",
+        "http service",
+        "microservice",
+        "microservices"
+    ],
+    "docker": [
+        "containerized",
+        "containerization"
+    ],
+    "kubernetes": [
+        "orchestration",
+        "container orchestration"
+    ],
+    "cicd": [
+        "deployment pipeline",
+        "build pipeline",
+        "release pipeline"
+    ]
+}
 
 CONTEXT_SKILL_MAP = {
     "unit test":"unittest",
@@ -183,18 +207,15 @@ CONTEXT_SKILL_MAP = {
     "release pipeline":"cicd",
 
     "microservice":"api",
-    "rest service":"rest",
-    "restful service":"rest",
 
+
+    "rest services": "api",
     "container":"docker",
     "containerization":"docker",
-
-    "event streaming":"kafka",
-
-    "cloud platform":"cloud",
-
+    "rest": "api",
+    "restful": "api",
     "agile":"agile",
-    "microservices": "docker",
+    "microservices": "api",
     "data pipeline": "airflow",
     "event streaming": "kafka"
 }
@@ -236,22 +257,43 @@ def extract_unique_skills(text):
     text = text.replace(" and ", " ")
     text = re.sub(r'\s+', ' ', text)
 
-    # ---- ADD THIS BLOCK HERE ----
+    # normalize plurals / variants
     text = re.sub(r'\bapis\b', 'api', text)
     text = re.sub(r'\blambdas\b', 'lambda', text)
     text = re.sub(r'\bqueues\b', 'queue', text)
     text = re.sub(r'\bdatabases\b', 'database', text)
     text = re.sub(r'\bservices\b', 'service', text)
-    # -----------------------------
+    text = re.sub(r'\brestful\b', 'rest', text)
 
+    # canonical normalization
     for variant, canonical in CANONICAL_MAP.items():
         pattern = r'\b' + re.escape(variant) + r'\b'
         text = re.sub(pattern, canonical, text)
 
+    # phrase normalization
     text = replace_phrase_skills(text)
+
 
     found_skills = set()
 
+    # =============================
+    # 🔥 1. CONTEXT INFERENCE (IMPORTANT FIX)
+    # =============================
+    for phrase, skill in CONTEXT_SKILL_MAP.items():
+        if phrase in text:
+            found_skills.add(skill)
+
+    # =============================
+    # 🔥 2. SEMANTIC PATTERNS
+    # =============================
+    for skill, patterns in SEMANTIC_PATTERNS.items():
+        for pattern in patterns:
+            if pattern in text:
+                found_skills.add(skill)
+
+    # =============================
+    # 🔥 3. EXACT MATCH
+    # =============================
     for skill in TECH_SKILLS:
         pattern = r'\b' + re.escape(skill) + r'\b'
         if re.search(pattern, text):
@@ -354,43 +396,37 @@ def generate_reasoning(
     missing_list = list(missing_required)[:3]
 
     matched_str = ", ".join(matched_list) if matched_list else ""
-    missing_str = ", ".join(missing_list) if missing_list else "a few additional tools"
+    missing_str = ", ".join(missing_list) if missing_list else ""
 
     if decision == "APPLY":
-
-        if matched_str:
-            return (
-                f"You already have several key skills such as {matched_str}. "
-                f"Your experience also aligns well with the expectations of this role."
-            )
-
-        return "Your profile aligns well with this role."
+        return (
+            f"You meet most of the core requirements for this role"
+            f"{f', including {matched_str}' if matched_str else ''}. "
+            f"Your experience also aligns well with typical expectations."
+        )
 
     if decision == "CONSIDER":
-
-        if matched_str:
-            return (
-                f"You already have some relevant skills including {matched_str}. "
-                f"However the role also expects technologies like {missing_str}."
-            )
-
-        return "Your profile partially aligns with this role."
+        return (
+            f"You meet several key requirements"
+            f"{f' such as {matched_str}' if matched_str else ''}, "
+            f"but the role also expects skills like {missing_str}. "
+            f"This suggests partial alignment with the role’s expectations, "
+            f"which may affect your chances in more competitive applications."
+        )
 
     if decision == "SKIP":
 
-        if required_experience and required_experience > user_experience:
+        if required_experience and user_experience < required_experience:
             return (
-                    f"This role typically expects around {required_experience} years of experience, "
-                    f"while your profile shows {user_experience} years — you may still apply if skills align."
+                f"This role typically expects around {required_experience} years of experience, "
+                f"while your profile shows {user_experience}. "
+                f"This gap may significantly impact your chances."
             )
 
-        if matched_str:
-            return (
-                f"You match {len(matched_required)} required skills including {matched_str}. "
-                f"However the role also expects technologies like {missing_str}."
-            )
-
-        return "This role currently requires several skills that are not present in your profile."
+        return (
+            f"This role expects skills like {missing_str} which are not present in your profile. "
+            f"Your current skill set does not fully align with the core expectations of this role."
+        )
 
     return ""
 
@@ -427,7 +463,9 @@ def analyze_job(resume_skills, job_description, user_experience):
     total_required = len(required_skills)
     total_nice = len(nice_skills)
 
-    # Scoring
+    # =============================
+    # SCORING
+    # =============================
     def weighted_score(matched, total):
         if not total:
             return 0
@@ -437,42 +475,75 @@ def analyze_job(resume_skills, job_description, user_experience):
 
         return (matched_weight / total_weight) * 100
 
-
     required_percent = weighted_score(matched_required, required_skills)
     nice_percent = weighted_score(matched_nice, nice_skills)
 
+    # 🔥 Base score
+    final_score = (required_percent * 0.85) + (nice_percent * 0.15)
 
-    final_score = (required_percent * 0.8) + (nice_percent * 0.2)
-    final_score = min(final_score, 100)
+    # 🔥 Penalize missing core skills
+    critical_penalty = 0
+    for skill in missing_required:
+        if get_skill_weight(skill) == 1.0:
+            critical_penalty += 5
 
-    # Penalize weak matches
+    final_score -= critical_penalty
+
+    # 🔥 Penalize weak matches
     min_required_matches = max(1, int(len(required_skills) * 0.25))
     if len(matched_required) < min_required_matches:
         final_score *= 0.75
 
-    # Edge cases
+    # =============================
+    # 🔥 SENIOR DEPTH PENALTY (KEY FIX)
+    # =============================
+    SENIOR_KEYWORDS = [
+        "system design",
+        "distributed",
+        "scalable",
+        "architecture"
+    ]
+
+    jd_lower = job_description.lower()
+    senior_signal = any(k in jd_lower for k in SENIOR_KEYWORDS)
+
+    if senior_signal and len(matched_required) < 3:
+        final_score *= 0.7
+
+    # =============================
+    # EDGE CASES
+    # =============================
     if total_required == 0:
         final_score = max(final_score, 50)
 
     if total_required == 1:
         final_score = max(final_score, 40)
 
-    # Decision
-    if final_score >= 70:
+    # 🔥 Clamp
+    final_score = max(0, min(final_score, 100))
+
+    # =============================
+    # DECISION
+    # =============================
+    if final_score >= 75:
         decision = "APPLY"
-    elif final_score >= 40:
+    elif final_score >= 45:
         decision = "CONSIDER"
     else:
         decision = "SKIP"
 
-    # Experience check
+    # =============================
+    # EXPERIENCE CHECK
+    # =============================
     required_experience = extract_required_experience(job_description)
     experience_block = False
 
     if required_experience and user_experience < required_experience:
         experience_block = True
 
-    # Reasoning
+    # =============================
+    # REASONING
+    # =============================
     reasoning = generate_reasoning(
         decision,
         matched_required,
@@ -482,7 +553,9 @@ def analyze_job(resume_skills, job_description, user_experience):
         user_experience
     )
 
-    # ✅ CRITICAL FIX: Preserve JD order (NO SORTING)
+    # =============================
+    # ORDER PRESERVATION
+    # =============================
     matched_required_ordered = [
         skill for skill in required_skills if skill in resume_skills
     ]
@@ -495,6 +568,20 @@ def analyze_job(resume_skills, job_description, user_experience):
         skill for skill in nice_skills if skill in resume_skills
     ]
 
+    # =============================
+    # LOW SIGNAL DETECTION
+    # =============================
+    low_signal = False
+
+    if len(required_skills) < 3:
+        low_signal = True
+
+    if len(job_description.strip()) < 200:
+        low_signal = True
+
+    # =============================
+    # FINAL RESPONSE
+    # =============================
     return {
         "match_score": round(final_score, 2),
         "decision": decision,
@@ -504,5 +591,6 @@ def analyze_job(resume_skills, job_description, user_experience):
         "matched_nice": matched_nice_ordered,
         "required_experience": required_experience,
         "user_experience_years": user_experience,
-        "experience_block": experience_block
+        "experience_block": experience_block,
+        "low_signal": low_signal,
     }
