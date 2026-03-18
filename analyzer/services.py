@@ -1,5 +1,33 @@
 import re
 
+SKILL_PRIORITY = {
+    "python": "core",
+    "django": "core",
+    "java": "core",
+
+    "sql": "secondary",
+    "mysql": "secondary",
+    "postgresql": "secondary",
+    "api": "secondary",
+    "rest": "secondary",
+    "git": "secondary",
+
+    "kafka": "advanced",
+    "docker": "advanced",
+    "kubernetes": "advanced",
+    "clickhouse": "advanced"
+}
+
+
+def get_skill_weight(skill):
+    level = SKILL_PRIORITY.get(skill, "secondary")
+
+    if level == "core":
+        return 1.0
+    elif level == "secondary":
+        return 0.7
+    else:
+        return 0.4
 
 STOP_WORDS = {
     "and","or","the","a","an",
@@ -70,7 +98,7 @@ TECH_SKILLS = {
     "bigquery","redshift",
 
     # Cloud
-    "aws","gcp","azure","cloudformation","serverless","cloud",
+    "aws","gcp","azure","cloudformation","serverless",
     "lambda","ec2","s3","eks","ecs","fargate",
     "cloudrun","cloudfunctions","cloudbuild",
 
@@ -115,7 +143,6 @@ TECH_SKILLS = {
 
     # Concepts
     "ml","dl","nlp","cv","oop","designpatterns","unittest",
-    "microservices","distributed","eventdriven","concurrency","multithreading",
 
     # Methodologies
     "agile"
@@ -250,7 +277,7 @@ def extract_jd_sections(job_description):
             "qualifications","technical skills",
             "skills required","key skills",
             "skills and experience",
-            "your skills","experience",
+            "your skills",
             "tech stack",
             "technology stack",
             "your skills include",
@@ -285,26 +312,31 @@ def extract_required_experience(text):
 
     text = text.lower()
 
+    # normalize different dash types
+    text = text.replace("–", "-").replace("—", "-")
+
     patterns = [
 
-    # experience before numbers
-    r'(?:experience|exp).{0,20}(\d+)\s*-\s*(\d+)\s*(?:years?|yrs?)',
+        # 1-4 years OR 1 - 4 years
+        r'(\d+)\s*-\s*(\d+)\s*(?:years?|yrs?)',
 
-    # number range
-    r'(\d+)\s*-\s*(\d+)\s*(?:years?|yrs?)',
+        # 1 to 4 years
+        r'(\d+)\s*to\s*(\d+)\s*(?:years?|yrs?)',
 
-    # 5+ years
-    r'(\d+)\+?\s*(?:years?|yrs?).{0,20}(?:experience|exp)',
-
-    # experience ... 5 years
-    r'(?:experience|exp).{0,20}(\d+)\+?\s*(?:years?|yrs?)'
-]
+        # 4+ years
+        r'(\d+)\+?\s*(?:years?|yrs?)'
+    ]
 
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
+
             nums = [int(n) for n in match.groups() if n]
-            return min(nums)
+
+            if len(nums) >= 2:
+                return min(nums)   # ✅ ALWAYS lower bound
+
+            return nums[0]  # single value case
 
     return None
 
@@ -318,11 +350,11 @@ def generate_reasoning(
     user_experience
 ):
 
-    matched_list = sorted(list(matched_required))[:3]
-    missing_list = sorted(list(missing_required))[:3]
+    matched_list = list(matched_required)[:3]
+    missing_list = list(missing_required)[:3]
 
     matched_str = ", ".join(matched_list) if matched_list else ""
-    missing_str = ", ".join(missing_list) if missing_list else "other technologies"
+    missing_str = ", ".join(missing_list) if missing_list else "a few additional tools"
 
     if decision == "APPLY":
 
@@ -348,8 +380,8 @@ def generate_reasoning(
 
         if required_experience and required_experience > user_experience:
             return (
-                f"This role expects around {required_experience} years of experience "
-                f"while your profile shows {user_experience} years."
+                    f"This role typically expects around {required_experience} years of experience, "
+                    f"while your profile shows {user_experience} years — you may still apply if skills align."
             )
 
         if matched_str:
@@ -367,51 +399,65 @@ def analyze_job(resume_skills, job_description, user_experience):
 
     job_description = job_description[:3000]
 
+    # Normalize resume skills
     resume_skills = set(normalize_skill(s) for s in resume_skills)
 
+    # Extract JD sections
     required_skills, nice_skills = extract_jd_sections(job_description)
 
+    # Fallback if JD sections fail
     if not required_skills:
-        required_skills = extract_unique_skills(job_description)
+        all_skills = extract_unique_skills(job_description)
+        required_skills = set(all_skills)
 
+    # Context inference
     context_skills = set(normalize_skill(s) for s in infer_context_skills(job_description))
+    required_skills = required_skills.union(context_skills.intersection(TECH_SKILLS))
 
-    required_skills = required_skills.union(context_skills)
-
+    # Normalize again (safety)
     required_skills = set(normalize_skill(s) for s in required_skills)
     nice_skills = set(normalize_skill(s) for s in nice_skills)
 
+    # Matching
     matched_required = resume_skills & required_skills
     missing_required = required_skills - resume_skills
     matched_nice = resume_skills & nice_skills
 
+    # Counts
     total_required = len(required_skills)
     total_nice = len(nice_skills)
 
-    required_percent = (
-        (len(matched_required) / total_required) * 100
-        if total_required > 0 else 0
-    )
+    # Scoring
+    def weighted_score(matched, total):
+        if not total:
+            return 0
 
-    nice_percent = (
-        (len(matched_nice) / total_nice) * 100
-        if total_nice > 0 else 0
-    )
+        matched_weight = sum(get_skill_weight(s) for s in matched)
+        total_weight = sum(get_skill_weight(s) for s in total)
+
+        return (matched_weight / total_weight) * 100
+
+
+    required_percent = weighted_score(matched_required, required_skills)
+    nice_percent = weighted_score(matched_nice, nice_skills)
+
 
     final_score = (required_percent * 0.8) + (nice_percent * 0.2)
     final_score = min(final_score, 100)
 
-    min_required_matches = max(2, int(len(required_skills) * 0.3))
-
+    # Penalize weak matches
+    min_required_matches = max(1, int(len(required_skills) * 0.25))
     if len(matched_required) < min_required_matches:
-        final_score *= 0.6
+        final_score *= 0.75
 
+    # Edge cases
     if total_required == 0:
         final_score = max(final_score, 50)
 
     if total_required == 1:
         final_score = max(final_score, 40)
 
+    # Decision
     if final_score >= 70:
         decision = "APPLY"
     elif final_score >= 40:
@@ -419,14 +465,14 @@ def analyze_job(resume_skills, job_description, user_experience):
     else:
         decision = "SKIP"
 
+    # Experience check
     required_experience = extract_required_experience(job_description)
-
     experience_block = False
 
-    if required_experience and user_experience + 2 < required_experience:
-        decision = "SKIP"
+    if required_experience and user_experience < required_experience:
         experience_block = True
 
+    # Reasoning
     reasoning = generate_reasoning(
         decision,
         matched_required,
@@ -436,13 +482,26 @@ def analyze_job(resume_skills, job_description, user_experience):
         user_experience
     )
 
+    # ✅ CRITICAL FIX: Preserve JD order (NO SORTING)
+    matched_required_ordered = [
+        skill for skill in required_skills if skill in resume_skills
+    ]
+
+    missing_required_ordered = [
+        skill for skill in required_skills if skill not in resume_skills
+    ]
+
+    matched_nice_ordered = [
+        skill for skill in nice_skills if skill in resume_skills
+    ]
+
     return {
         "match_score": round(final_score, 2),
         "decision": decision,
         "reasoning": reasoning,
-        "matched_required": sorted(list(matched_required)),
-        "missing_required": sorted(list(missing_required)),
-        "matched_nice": sorted(list(matched_nice)),
+        "matched_required": matched_required_ordered,
+        "missing_required": missing_required_ordered,
+        "matched_nice": matched_nice_ordered,
         "required_experience": required_experience,
         "user_experience_years": user_experience,
         "experience_block": experience_block
