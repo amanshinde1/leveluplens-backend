@@ -495,7 +495,7 @@ def analyze_job(resume_skills, job_description, user_experience):
         final_score *= 0.75
 
     # =============================
-    # 🔥 SENIOR DEPTH PENALTY (KEY FIX)
+    # 🔥 SENIOR DEPTH PENALTY
     # =============================
     SENIOR_KEYWORDS = [
         "system design",
@@ -533,6 +533,16 @@ def analyze_job(resume_skills, job_description, user_experience):
         decision = "SKIP"
 
     # =============================
+    # ✅ NEW: RISK LABEL
+    # =============================
+    if final_score >= 75:
+        risk = "Strong Alignment"
+    elif final_score >= 45:
+        risk = "Moderate Alignment"
+    else:
+        risk = "Low Alignment"
+
+    # =============================
     # EXPERIENCE CHECK
     # =============================
     required_experience = extract_required_experience(job_description)
@@ -552,6 +562,30 @@ def analyze_job(resume_skills, job_description, user_experience):
         required_experience,
         user_experience
     )
+
+    # =============================
+    # ✅ NEW: FRICTION MESSAGE
+    # =============================
+    if risk == "High Risk":
+        friction = "You may be competing with significantly stronger profiles."
+    elif risk == "Medium Risk":
+        friction = "You meet some requirements, but gaps may affect your chances."
+    else:
+        friction = "Your profile aligns well with this role."
+
+    # =============================
+    # ✅ NEW: LEARNING INSIGHT
+    # =============================
+    learning = ""
+
+    if "django" in required_skills and "rest" in required_skills:
+        learning = "Most backend roles expect both framework knowledge and API experience."
+    elif "docker" in required_skills:
+        learning = "Modern backend roles often expect deployment knowledge."
+    elif "aws" in required_skills:
+        learning = "Cloud experience is increasingly expected in backend roles."
+    elif len(required_skills) > 8:
+        learning = "This role has broad requirements, indicating higher competition."
 
     # =============================
     # ORDER PRESERVATION
@@ -585,6 +619,9 @@ def analyze_job(resume_skills, job_description, user_experience):
     return {
         "match_score": round(final_score, 2),
         "decision": decision,
+        "risk": risk,
+        "friction": friction,
+        "learning": learning,
         "reasoning": reasoning,
         "matched_required": matched_required_ordered,
         "missing_required": missing_required_ordered,
