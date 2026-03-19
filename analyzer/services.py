@@ -274,14 +274,15 @@ def extract_unique_skills(text):
     text = replace_phrase_skills(text)
 
 
-    found_skills = set()
+    explicit_skills = set()
+    inferred_skills = set()
 
     # =============================
     # 🔥 1. CONTEXT INFERENCE (IMPORTANT FIX)
     # =============================
     for phrase, skill in CONTEXT_SKILL_MAP.items():
         if phrase in text:
-            found_skills.add(skill)
+            inferred_skills.add(skill)
 
     # =============================
     # 🔥 2. SEMANTIC PATTERNS
@@ -289,7 +290,7 @@ def extract_unique_skills(text):
     for skill, patterns in SEMANTIC_PATTERNS.items():
         for pattern in patterns:
             if pattern in text:
-                found_skills.add(skill)
+                inferred_skills.add(skill)
 
     # =============================
     # 🔥 3. EXACT MATCH
@@ -297,9 +298,9 @@ def extract_unique_skills(text):
     for skill in TECH_SKILLS:
         pattern = r'\b' + re.escape(skill) + r'\b'
         if re.search(pattern, text):
-            found_skills.add(normalize_skill(skill))
+            explicit_skills.add(normalize_skill(skill))
 
-    return found_skills
+    return explicit_skills, inferred_skills
 
 
 def extract_jd_sections(job_description):
@@ -438,15 +439,20 @@ def analyze_job(resume_skills, job_description, user_experience):
     # Normalize resume skills
     resume_skills = set(normalize_skill(s) for s in resume_skills)
 
-    # Extract JD sections
-    required_skills, nice_skills = extract_jd_sections(job_description)
+    # =============================
+    # EXTRACT SKILLS (NEW FIX)
+    # =============================
+    required_explicit, required_inferred = extract_unique_skills(job_description)
+    required_skills = required_explicit | required_inferred
 
-    # Fallback if JD sections fail
+    nice_skills = set()
+
+    # Fallback (safe)
     if not required_skills:
-        all_skills = extract_unique_skills(job_description)
-        required_skills = set(all_skills)
+        fallback_explicit, fallback_inferred = extract_unique_skills(job_description)
+        required_skills = fallback_explicit | fallback_inferred
 
-    # Context inference
+    # Context inference (keep existing logic)
     context_skills = set(normalize_skill(s) for s in infer_context_skills(job_description))
     required_skills = required_skills.union(context_skills.intersection(TECH_SKILLS))
 
@@ -454,12 +460,17 @@ def analyze_job(resume_skills, job_description, user_experience):
     required_skills = set(normalize_skill(s) for s in required_skills)
     nice_skills = set(normalize_skill(s) for s in nice_skills)
 
-    # Matching
+    # =============================
+    # MATCHING
+    # =============================
     matched_required = resume_skills & required_skills
     missing_required = required_skills - resume_skills
     matched_nice = resume_skills & nice_skills
 
-    # Counts
+    # 🔥 NEW: explicit vs inferred split
+    matched_required_explicit = resume_skills & required_explicit
+    matched_required_inferred = (resume_skills & required_inferred) - matched_required_explicit
+
     total_required = len(required_skills)
     total_nice = len(nice_skills)
 
@@ -478,37 +489,36 @@ def analyze_job(resume_skills, job_description, user_experience):
     required_percent = weighted_score(matched_required, required_skills)
     nice_percent = weighted_score(matched_nice, nice_skills)
 
-    # 🔥 Base score
-    final_score = (required_percent * 0.85) + (nice_percent * 0.15)
+    base_score = (required_percent * 0.85) + (nice_percent * 0.15)
+    final_score = base_score
 
-    # 🔥 Penalize missing core skills
-    critical_penalty = 0
-    for skill in missing_required:
-        if get_skill_weight(skill) == 1.0:
-            critical_penalty += 5
-
+    # =============================
+    # PENALTIES
+    # =============================
+    critical_missing = [s for s in missing_required if get_skill_weight(s) == 1.0]
+    critical_penalty = min(15, len(critical_missing) * 4)
     final_score -= critical_penalty
 
-    # 🔥 Penalize weak matches
-    min_required_matches = max(1, int(len(required_skills) * 0.25))
-    if len(matched_required) < min_required_matches:
-        final_score *= 0.75
+    match_ratio = len(matched_required) / max(1, len(required_skills))
+
+    if match_ratio < 0.25:
+        final_score *= 0.7
+    elif match_ratio < 0.5:
+        final_score *= 0.85
 
     # =============================
-    # 🔥 SENIOR DEPTH PENALTY
+    # SENIOR PENALTY
     # =============================
-    SENIOR_KEYWORDS = [
-        "system design",
-        "distributed",
-        "scalable",
-        "architecture"
-    ]
+    SENIOR_KEYWORDS = ["system design", "distributed", "scalable", "architecture"]
 
     jd_lower = job_description.lower()
     senior_signal = any(k in jd_lower for k in SENIOR_KEYWORDS)
 
+    senior_penalty_applied = False
+
     if senior_signal and len(matched_required) < 3:
-        final_score *= 0.7
+        final_score *= 0.75
+        senior_penalty_applied = True
 
     # =============================
     # EDGE CASES
@@ -519,21 +529,22 @@ def analyze_job(resume_skills, job_description, user_experience):
     if total_required == 1:
         final_score = max(final_score, 40)
 
-    # 🔥 Clamp
     final_score = max(0, min(final_score, 100))
 
     # =============================
     # DECISION
     # =============================
     if final_score >= 75:
+        decision = "STRONG_APPLY"
+    elif final_score >= 55:
         decision = "APPLY"
-    elif final_score >= 45:
+    elif final_score >= 35:
         decision = "CONSIDER"
     else:
         decision = "SKIP"
 
     # =============================
-    # ✅ NEW: RISK LABEL
+    # RISK
     # =============================
     if final_score >= 75:
         risk = "Strong Alignment"
@@ -543,13 +554,59 @@ def analyze_job(resume_skills, job_description, user_experience):
         risk = "Low Alignment"
 
     # =============================
-    # EXPERIENCE CHECK
+    # EXPERIENCE
     # =============================
     required_experience = extract_required_experience(job_description)
     experience_block = False
 
     if required_experience and user_experience < required_experience:
         experience_block = True
+
+    # =============================
+    # CONFIDENCE
+    # =============================
+    low_signal = False
+
+    if len(required_skills) < 3:
+        low_signal = True
+
+    if len(job_description.strip()) < 200:
+        low_signal = True
+
+    if low_signal:
+        confidence = "LOW"
+    elif len(required_skills) < 5:
+        confidence = "MEDIUM"
+    else:
+        confidence = "HIGH"
+
+    # =============================
+    # GAPS
+    # =============================
+    critical_gaps = list(critical_missing)
+    learnable_gaps = [s for s in missing_required if s not in critical_missing]
+
+    # =============================
+    # BREAKDOWN
+    # =============================
+    score_breakdown = {
+        "required": {
+            "matched": len(matched_required),
+            "total": total_required,
+            "percent": round(required_percent, 2),
+        },
+        "nice": {
+            "matched": len(matched_nice),
+            "total": total_nice,
+            "percent": round(nice_percent, 2),
+        },
+        "penalties": {
+            "critical_missing_count": len(critical_missing),
+            "critical_penalty": critical_penalty,
+            "low_match_penalty": match_ratio < 0.5,
+            "senior_penalty": senior_penalty_applied
+        }
+    }
 
     # =============================
     # REASONING
@@ -564,17 +621,17 @@ def analyze_job(resume_skills, job_description, user_experience):
     )
 
     # =============================
-    # ✅ NEW: FRICTION MESSAGE
+    # FRICTION
     # =============================
-    if risk == "High Risk":
+    if risk == "Low Alignment":
         friction = "You may be competing with significantly stronger profiles."
-    elif risk == "Medium Risk":
+    elif risk == "Moderate Alignment":
         friction = "You meet some requirements, but gaps may affect your chances."
     else:
         friction = "Your profile aligns well with this role."
 
     # =============================
-    # ✅ NEW: LEARNING INSIGHT
+    # LEARNING
     # =============================
     learning = ""
 
@@ -588,7 +645,7 @@ def analyze_job(resume_skills, job_description, user_experience):
         learning = "This role has broad requirements, indicating higher competition."
 
     # =============================
-    # ORDER PRESERVATION
+    # ORDER
     # =============================
     matched_required_ordered = [
         skill for skill in required_skills if skill in resume_skills
@@ -603,31 +660,36 @@ def analyze_job(resume_skills, job_description, user_experience):
     ]
 
     # =============================
-    # LOW SIGNAL DETECTION
-    # =============================
-    low_signal = False
-
-    if len(required_skills) < 3:
-        low_signal = True
-
-    if len(job_description.strip()) < 200:
-        low_signal = True
-
-    # =============================
     # FINAL RESPONSE
     # =============================
     return {
         "match_score": round(final_score, 2),
+        "confidence": confidence,
         "decision": decision,
         "risk": risk,
+
+        "score_breakdown": score_breakdown,
+
+        "resume_skills_detected": list(resume_skills),
+        "job_skills_detected": list(required_skills | nice_skills),
+
+        "critical_gaps": critical_gaps,
+        "learnable_gaps": learnable_gaps,
+
         "friction": friction,
         "learning": learning,
         "reasoning": reasoning,
+
         "matched_required": matched_required_ordered,
+        "matched_required_explicit": list(matched_required_explicit),
+        "matched_required_inferred": list(matched_required_inferred),
+
         "missing_required": missing_required_ordered,
         "matched_nice": matched_nice_ordered,
+
         "required_experience": required_experience,
         "user_experience_years": user_experience,
         "experience_block": experience_block,
+
         "low_signal": low_signal,
     }
